@@ -40,6 +40,17 @@ const (
 	ChannelSlackWebHook   = "slack_webhook"
 )
 
+var legacyChannelTypeAliases = map[string]string{
+	"wecom_app": ChannelWeCom,
+}
+
+func normalizeChannelType(channelType string) string {
+	if normalized, ok := legacyChannelTypeAliases[channelType]; ok {
+		return normalized
+	}
+	return channelType
+}
+
 func initChannel() {
 	registerSingletonChannel(ChannelPico)
 	registerSingletonChannel(ChannelPicoClient)
@@ -486,8 +497,9 @@ func (c ChannelsConfig) GetByType(t string) *Channel {
 	if c == nil {
 		return nil
 	}
+	t = normalizeChannelType(t)
 	for _, bc := range c {
-		if bc.Type == t {
+		if normalizeChannelType(bc.Type) == t {
 			return bc
 		}
 	}
@@ -514,9 +526,9 @@ func validateSingletonChannels(channels ChannelsConfig) error {
 		if !bc.Enabled {
 			continue
 		}
-		t := bc.Type
+		t := normalizeChannelType(bc.Type)
 		if t == "" {
-			t = name
+			t = normalizeChannelType(name)
 		}
 		if IsSingletonChannel(t) {
 			typeCount[t]++
@@ -691,12 +703,14 @@ var channelSettingsFactory = map[string]any{
 func RegisterChannelSettings(channelType string, prototype any) {
 	channelSettingsMu.Lock()
 	defer channelSettingsMu.Unlock()
+	channelType = normalizeChannelType(channelType)
 	channelSettingsFactory[channelType] = prototype
 }
 
 // newChannelSettings creates a fresh zero-value pointer for the given channel type.
 // Returns nil if the type is not registered.
 func newChannelSettings(channelType string) any {
+	channelType = normalizeChannelType(channelType)
 	channelSettingsMu.RLock()
 	proto, ok := channelSettingsFactory[channelType]
 	channelSettingsMu.RUnlock()
@@ -708,6 +722,7 @@ func newChannelSettings(channelType string) any {
 
 // isValidChannelType returns true if the channel type is a known, registered type.
 func isValidChannelType(channelType string) bool {
+	channelType = normalizeChannelType(channelType)
 	channelSettingsMu.RLock()
 	_, ok := channelSettingsFactory[channelType]
 	channelSettingsMu.RUnlock()
@@ -736,6 +751,7 @@ func InitChannelList(channels ChannelsConfig) error {
 		if bc.Type == "" {
 			bc.Type = name
 		}
+		bc.Type = normalizeChannelType(bc.Type)
 		if !isValidChannelType(bc.Type) {
 			return fmt.Errorf("channel %q has unknown type %q", name, bc.Type)
 		}

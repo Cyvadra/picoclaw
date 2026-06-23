@@ -52,3 +52,21 @@ func TestRegisterChannelSettings_InitChannelList(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "secret-123", cfg.Token)
 }
+
+func TestInitChannelList_NormalizesLegacyWeComAppType(t *testing.T) {
+	channels := ChannelsConfig{
+		"wecom_app": {
+			Type:     "wecom_app",
+			Enabled:  true,
+			Settings: RawNode(`{"bot_id":"bot","secret":"secret","websocket_url":"wss://openws.work.weixin.qq.com"}`),
+		},
+	}
+
+	require.NoError(t, InitChannelList(channels))
+	assert.Equal(t, ChannelWeCom, channels["wecom_app"].Type)
+
+	decoded, err := channels["wecom_app"].GetDecoded()
+	require.NoError(t, err)
+	_, ok := decoded.(*WeComSettings)
+	assert.Truef(t, ok, "decoded settings = %T, want *WeComSettings", decoded)
+}

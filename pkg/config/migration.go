@@ -57,8 +57,63 @@ type legacyDiagnosticAgentDefaults struct {
 }
 
 func validateLegacyConfigDiagnostics(data []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return wrapJSONError(data, err, "config.json")
+	}
+	if normalizeLegacyWebAPIKeys(raw) {
+		var err error
+		data, err = json.Marshal(raw)
+		if err != nil {
+			return err
+		}
+	}
+
 	var cfg legacyDiagnosticConfig
 	return decodeJSONWithDiagnostics(data, &cfg, "config.json")
+}
+
+func normalizeLegacyWebAPIKeys(m map[string]any) bool {
+	tools, ok := m["tools"].(map[string]any)
+	if !ok {
+		return false
+	}
+	web, ok := tools["web"].(map[string]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, providerName := range []string{"brave", "tavily", "perplexity", "kagi"} {
+		provider, ok := web[providerName].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := provider["api_key"]; ok {
+			changed = true
+		}
+		if keys := toUniqueStrings(provider["api_key"], provider["api_keys"]); len(keys) > 0 {
+			provider["api_keys"] = keys
+		}
+		delete(provider, "api_key")
+	}
+	return changed
+}
+
+func normalizeLegacyModelAPIKeys(m map[string]any) {
+	modelList, ok := m["model_list"].([]any)
+	if !ok {
+		return
+	}
+	for _, model := range modelList {
+		mVal, ok := model.(map[string]any)
+		if !ok {
+			continue
+		}
+		if ss := toUniqueStrings(mVal["api_key"], mVal["api_keys"]); len(ss) > 0 {
+			mVal["api_keys"] = ss
+		}
+		delete(mVal, "api_key")
+	}
 }
 
 func migrateLegacyAgentDefaultsModel(m map[string]any) {
@@ -180,6 +235,7 @@ func migrateV0ToV1(m map[string]any) error {
 		return fmt.Errorf("migrateV0ToV1: expected version 0, got %v", m["version"])
 	}
 
+	normalizeLegacyWebAPIKeys(m)
 	migrateLegacyAgentDefaultsModel(m)
 
 	// Migrate legacy providers to model_list if no model_list exists
@@ -211,17 +267,7 @@ func migrateV0ToV1(m map[string]any) error {
 		}
 	}
 
-	// Convert model_list api_key → api_keys
-	if modelList, ok := m["model_list"].([]any); ok {
-		for _, model := range modelList {
-			if mVal, ok := model.(map[string]any); ok {
-				if ss := toUniqueStrings(mVal["api_key"], mVal["api_keys"]); len(ss) > 0 {
-					mVal["api_keys"] = ss
-					delete(mVal, "api_key")
-				}
-			}
-		}
-	}
+	normalizeLegacyModelAPIKeys(m)
 
 	m["version"] = 1
 
@@ -272,6 +318,7 @@ func migrateV1ToV2(m map[string]any) error {
 		return fmt.Errorf("migrateV1ToV2: expected version 1, got %#v", m["version"])
 	}
 
+	normalizeLegacyWebAPIKeys(m)
 	// Migrate channels: move "mention_only" to "group_trigger.mention_only"
 	if channels, ok := m["channels"]; ok {
 		if chMap, ok := channels.(map[string]any); ok {
@@ -292,15 +339,7 @@ func migrateV1ToV2(m map[string]any) error {
 
 	// Infer "enabled" field for models matching configV1.migrateModelEnabled behavior
 	if modelList, ok := m["model_list"].([]any); ok {
-		// Convert api_key → api_keys for each model
-		for _, model := range modelList {
-			if mVal, ok := model.(map[string]any); ok {
-				if ss := toUniqueStrings(mVal["api_key"], mVal["api_keys"]); len(ss) > 0 {
-					mVal["api_keys"] = ss
-					delete(mVal, "api_key")
-				}
-			}
-		}
+		normalizeLegacyModelAPIKeys(m)
 
 		// Infer enabled status
 		for _, model := range modelList {
@@ -348,6 +387,8 @@ func migrateV2ToV3(m map[string]any) error {
 	if !compareInt(m["version"], 2) {
 		return fmt.Errorf("migrateV2ToV3: expected version 2, got %v", m["version"])
 	}
+	normalizeLegacyWebAPIKeys(m)
+	normalizeLegacyModelAPIKeys(m)
 
 	migrateLegacyAgentDefaultsModel(m)
 	delete(m, "bindings")

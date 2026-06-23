@@ -1108,3 +1108,63 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Errorf("github registry base_url = %q, want %q", githubRegistry.BaseURL, "https://github.com")
 	}
 }
+
+func TestLoadConfig_LegacyWebToolAPIKeyMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	legacyConfig := `{
+		"tools": {
+			"web": {
+				"brave": {"enabled": true, "api_key": "brave-key"},
+				"tavily": {"enabled": true, "api_key": "tavily-key"},
+				"perplexity": {"enabled": true, "api_key": "perplexity-key"}
+			}
+		},
+		"gateway": {"host": "127.0.0.1", "port": 18790}
+	}`
+
+	if err := os.WriteFile(configPath, []byte(legacyConfig), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	require.Equal(t, CurrentVersion, cfg.Version)
+	require.Equal(t, []string{"brave-key"}, cfg.Tools.Web.Brave.APIKeys.Values())
+	require.Equal(t, []string{"tavily-key"}, cfg.Tools.Web.Tavily.APIKeys.Values())
+	require.Equal(t, []string{"perplexity-key"}, cfg.Tools.Web.Perplexity.APIKeys.Values())
+}
+
+func TestLoadConfig_LegacyModelListEmptyAPIKeyMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	legacyConfig := `{
+		"model_list": [
+			{"model_name": "gpt-5.4", "model": "openai/gpt-5.4", "api_base": "https://api.openai.com/v1", "api_key": ""},
+			{"model_name": "deepseek-chat", "model": "deepseek/deepseek-chat", "api_key": "sk-test"}
+		],
+		"gateway": {"host": "127.0.0.1", "port": 18790}
+	}`
+
+	if err := os.WriteFile(configPath, []byte(legacyConfig), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	require.Equal(t, CurrentVersion, cfg.Version)
+	firstModel, err := cfg.GetModelConfig("gpt-5.4")
+	require.NoError(t, err)
+	require.Empty(t, firstModel.APIKeys)
+	secondModel, err := cfg.GetModelConfig("deepseek-chat")
+	require.NoError(t, err)
+	require.Equal(t, []string{"sk-test"}, secondModel.APIKeys.Values())
+}
