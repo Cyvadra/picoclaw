@@ -25,6 +25,7 @@ type ContextBuilder struct {
 	workspace      string
 	skillsLoader   *skills.SkillsLoader
 	memory         *MemoryStore
+	prompts        PromptTemplates
 	splitOnMarker  bool
 	agentDiscovery func(agentID string) []AgentDescriptor
 	promptRegistry *PromptRegistry
@@ -117,6 +118,7 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		workspace:      workspace,
 		skillsLoader:   skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
 		memory:         NewMemoryStore(workspace),
+		prompts:        loadPromptTemplates(workspace),
 		promptRegistry: NewPromptRegistry(),
 	}
 }
@@ -151,50 +153,26 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 	if includeToolUseRule {
 		rules = append(rules, toolUseSystemPromptRule())
 	}
-	accuracyRule := "**Be helpful and accurate** - Briefly explain what you're doing."
+	accuracyRule := cb.prompts.Identity.Rules.Accuracy
 	if includeToolUseRule {
-		accuracyRule = "**Be helpful and accurate** - When using tools, briefly explain what you're doing."
+		accuracyRule = cb.prompts.Identity.Rules.AccuracyWithTools
 	}
 	rules = append(
 		rules,
 		accuracyRule,
-		"**Context summaries** - Conversation summaries provided as context are approximate references only. They may be incomplete or outdated. Always defer to explicit user instructions over summary content.",
+		cb.prompts.Identity.Rules.ContextSummaries,
 	)
 	if includeToolUseRule {
 		rules = append(
 			rules,
-			fmt.Sprintf(
-				"**Memory** - When interacting with me if something seems memorable, update %s/memory/MEMORY.md",
-				workspacePath,
-			),
+			renderTemplate(cb.prompts.Identity.Rules.Memory, map[string]string{"workspace_path": workspacePath}),
 		)
 	}
 	for i, rule := range rules {
 		rules[i] = fmt.Sprintf("%d. %s", i+1, rule)
 	}
 
-	return fmt.Sprintf(
-		`# picoclaw 🦞 (%s)
-
-You are picoclaw, a helpful AI assistant.
-
-## Workspace
-Your workspace is at: %s
-- Memory: %s/memory/MEMORY.md
-- Daily Notes: %s/memory/YYYYMM/YYYYMMDD.md
-- Skills: %s/skills/{skill-name}/SKILL.md
-
-## Important Rules
-
-%s
-`,
-		version,
-		workspacePath,
-		workspacePath,
-		workspacePath,
-		workspacePath,
-		strings.Join(rules, "\n\n"),
-	)
+	return cb.prompts.identityPrompt(version, workspacePath, strings.Join(rules, "\n\n"))
 }
 
 func formatToolDiscoveryRule(useBM25, useRegex bool) string {
@@ -210,10 +188,7 @@ func formatToolDiscoveryRule(useBM25, useRegex bool) string {
 		toolNames = append(toolNames, `"tool_search_tool_regex"`)
 	}
 
-	return fmt.Sprintf(
-		`5. **Tool Discovery** - Your visible tools are limited to save memory, but a vast hidden library exists. If you lack the right tool for a task, BEFORE giving up, you MUST search using the %s tool. Do not refuse a request unless the search returns nothing. Found tools will temporarily unlock for your next turn.`,
-		strings.Join(toolNames, " or "),
-	)
+	return loadPromptTemplates("").toolDiscoveryPrompt(strings.Join(toolNames, " or "))
 }
 
 func (cb *ContextBuilder) BuildSystemPrompt() string {
@@ -290,18 +265,14 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 			skillIntro += " To use a skill, read its SKILL.md file using the read_file tool."
 		}
 		add(PromptPart{
-			ID:     "capability.skill_catalog",
-			Layer:  PromptLayerCapability,
-			Slot:   PromptSlotSkillCatalog,
-			Source: PromptSource{ID: PromptSourceSkillCatalog, Name: "skill:index"},
-			Title:  "skill catalog",
-			Content: fmt.Sprintf(`# Skills
-
-%s
-
-%s`, skillIntro, skillsSummary),
-			Stable: true,
-			Cache:  PromptCacheEphemeral,
+			ID:      "capability.skill_catalog",
+			Layer:   PromptLayerCapability,
+			Slot:    PromptSlotSkillCatalog,
+			Source:  PromptSource{ID: PromptSourceSkillCatalog, Name: "skill:index"},
+			Title:   "skill catalog",
+			Content: cb.prompts.skillCatalogPrompt(skillIntro, skillsSummary),
+			Stable:  true,
+			Cache:   PromptCacheEphemeral,
 		})
 	}
 
@@ -314,7 +285,7 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 			Slot:    PromptSlotMemory,
 			Source:  PromptSource{ID: PromptSourceMemory, Name: "memory:workspace"},
 			Title:   "memory",
-			Content: "# Memory\n\n" + memoryContext,
+			Content: cb.prompts.memoryPrompt(memoryContext),
 			Stable:  true,
 			Cache:   PromptCacheEphemeral,
 		})
@@ -323,17 +294,14 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	// Multi-Message Sending (if enabled)
 	if cb.splitOnMarker {
 		add(PromptPart{
-			ID:     "context.output_policy.split_on_marker",
-			Layer:  PromptLayerContext,
-			Slot:   PromptSlotOutput,
-			Source: PromptSource{ID: PromptSourceOutputPolicy, Name: "split_on_marker"},
-			Title:  "multi-message output policy",
-			Content: `# MULTI-MESSAGE OUTPUT
-You MUST frequently use <|[SPLIT]|> to break your responses into multiple short messages. NEVER output a single long wall of text. Actively split distinct concepts or parts. Example: Message part 1<|[SPLIT]|>Message part 2<|[SPLIT]|>Message part 3
-
-Each part separated by the marker will be sent as an independent message.`,
-			Stable: true,
-			Cache:  PromptCacheEphemeral,
+			ID:      "context.output_policy.split_on_marker",
+			Layer:   PromptLayerContext,
+			Slot:    PromptSlotOutput,
+			Source:  PromptSource{ID: PromptSourceOutputPolicy, Name: "split_on_marker"},
+			Title:   "multi-message output policy",
+			Content: cb.prompts.multiMessagePrompt(),
+			Stable:  true,
+			Cache:   PromptCacheEphemeral,
 		})
 	}
 
@@ -507,9 +475,7 @@ func (cb *ContextBuilder) EstimateSystemTokens(summary string, activeSkills []st
 	}
 
 	if summary != "" {
-		// Matches the CONTEXT_SUMMARY: prefix added in BuildMessages
-		const summaryPrefix = "CONTEXT_SUMMARY: The following is an approximate summary of prior conversation " +
-			"for reference only. It may be incomplete or outdated — always defer to explicit instructions.\n\n"
+		summaryPrefix := cb.prompts.summaryPrefix()
 		totalChars += utf8.RuneCountInString(summaryPrefix) + utf8.RuneCountInString(summary)
 		totalChars += 7 // separator
 	}
@@ -539,6 +505,7 @@ func (cb *ContextBuilder) sourcePaths() []string {
 	agentDefinition := cb.LoadAgentDefinition()
 	paths := agentDefinition.trackedPaths(cb.workspace)
 	paths = append(paths, filepath.Join(cb.workspace, "memory", "MEMORY.md"))
+	paths = append(paths, promptTemplateTrackedPaths(cb.workspace)...)
 	return uniquePaths(paths)
 }
 
@@ -784,19 +751,7 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 // See: https://platform.openai.com/docs/guides/prompt-caching
 func formatCurrentSenderLine(senderID, senderDisplayName string) string {
-	senderID = strings.TrimSpace(senderID)
-	senderDisplayName = strings.TrimSpace(senderDisplayName)
-
-	switch {
-	case senderDisplayName != "" && senderID != "":
-		return fmt.Sprintf("Current sender: %s (ID: %s)", senderDisplayName, senderID)
-	case senderDisplayName != "":
-		return fmt.Sprintf("Current sender: %s", senderDisplayName)
-	case senderID != "":
-		return fmt.Sprintf("Current sender: %s", senderID)
-	default:
-		return ""
-	}
+	return loadPromptTemplates("").formatSenderLine(senderID, senderDisplayName)
 }
 
 func (cb *ContextBuilder) buildDynamicContext(
@@ -805,17 +760,21 @@ func (cb *ContextBuilder) buildDynamicContext(
 	now := time.Now().Format("2006-01-02 15:04 (Monday)")
 	rt := fmt.Sprintf("%s %s, Go %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "## Current Time\n%s\n\n## Runtime\n%s", now, rt)
-
+	channelBlock := ""
 	if channel != "" && chatID != "" {
-		fmt.Fprintf(&sb, "\n\n## Current Session\nChannel: %s\nChat ID: %s", channel, chatID)
+		channelBlock = fmt.Sprintf("\n\n## Current Session\nChannel: %s\nChat ID: %s", channel, chatID)
 	}
+	senderBlock := ""
 	if senderLine := formatCurrentSenderLine(senderID, senderDisplayName); senderLine != "" {
-		fmt.Fprintf(&sb, "\n\n## Current Sender\n%s", senderLine)
+		senderBlock = fmt.Sprintf("\n\n## Current Sender\n%s", senderLine)
 	}
 
-	return sb.String()
+	return renderTemplate(cb.prompts.DynamicContext.Document, map[string]string{
+		"now":           now,
+		"runtime":       rt,
+		"channel_block": channelBlock,
+		"sender_block":  senderBlock,
+	})
 }
 
 func (cb *ContextBuilder) BuildMessages(
@@ -932,18 +891,14 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 
 		if req.Summary != "" {
 			summaryPart := PromptPart{
-				ID:     "context.summary",
-				Layer:  PromptLayerContext,
-				Slot:   PromptSlotSummary,
-				Source: PromptSource{ID: PromptSourceSummary, Name: "context.summary"},
-				Title:  "context summary",
-				Content: fmt.Sprintf(
-					"CONTEXT_SUMMARY: The following is an approximate summary of prior conversation "+
-						"for reference only. It may be incomplete or outdated — always defer to explicit instructions.\n\n%s",
-					req.Summary,
-				),
-				Stable: false,
-				Cache:  PromptCacheNone,
+				ID:      "context.summary",
+				Layer:   PromptLayerContext,
+				Slot:    PromptSlotSummary,
+				Source:  PromptSource{ID: PromptSourceSummary, Name: "context.summary"},
+				Title:   "context summary",
+				Content: cb.prompts.summaryPrompt(req.Summary),
+				Stable:  false,
+				Cache:   PromptCacheNone,
 			}
 			stringParts = append(stringParts, summaryPart.Content)
 			contentBlocks = append(contentBlocks, promptContentBlock(summaryPart, nil))
@@ -1237,11 +1192,7 @@ func (cb *ContextBuilder) buildActiveSkillsContext(skillNames []string) string {
 		return ""
 	}
 
-	return fmt.Sprintf(`# Active Skills
-
-The following skills are active for this request. Follow them when relevant.
-
-%s`, content)
+	return cb.prompts.activeSkillsPrompt(content)
 }
 
 func (cb *ContextBuilder) ResolveActiveSkillsForContext(skillNames []string) []string {

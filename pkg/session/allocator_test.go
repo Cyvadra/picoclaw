@@ -127,7 +127,7 @@ func TestAllocateRouteSession_PicoDirectAliasesIncludeLegacyChatKey(t *testing.T
 			Account:  "default",
 			ChatID:   "pico:session-123",
 			ChatType: "direct",
-			SenderID: "pico-user",
+			SenderID: "Jason",
 		},
 		SessionPolicy: routing.SessionPolicy{
 			Dimensions: []string{"sender"},

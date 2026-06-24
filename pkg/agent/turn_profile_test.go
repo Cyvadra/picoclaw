@@ -206,7 +206,7 @@ func TestTurnProfile_ProcessMessageUsesEnabledTurnProfile(t *testing.T) {
 			Channel:  "pico",
 			ChatID:   "pico:sess-1",
 			ChatType: "direct",
-			SenderID: "pico-user",
+			SenderID: "Jason",
 		},
 		Content: "hello from pico",
 	})
@@ -254,7 +254,7 @@ func TestTurnProfile_BtwCommandUsesEnabledTurnProfile(t *testing.T) {
 			Channel:  "pico",
 			ChatID:   "pico:btw",
 			ChatType: "direct",
-			SenderID: "pico-user",
+			SenderID: "Jason",
 		},
 		Content: "/btw explain privately",
 	})
@@ -316,7 +316,7 @@ func TestTurnProfile_BtwCommandDoesNotAddToolFallbackWhenSystemPromptOff(t *test
 			Channel:  "pico",
 			ChatID:   "pico:btw-system-off",
 			ChatType: "direct",
-			SenderID: "pico-user",
+			SenderID: "Jason",
 		},
 		Content: "/btw explain privately",
 	})
@@ -364,7 +364,7 @@ func TestTurnProfile_BtwHookCannotReenableNativeSearchWhenToolsOff(t *testing.T)
 			Channel:  "pico",
 			ChatID:   "pico:btw-native-search",
 			ChatType: "direct",
-			SenderID: "pico-user",
+			SenderID: "Jason",
 		},
 		Content: "/btw search privately",
 	})

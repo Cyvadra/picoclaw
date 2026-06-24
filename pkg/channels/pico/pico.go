@@ -1193,7 +1193,7 @@ func (c *PicoChannel) handleMessageSend(pc *picoConn, msg PicoMessage) {
 	}
 
 	chatID := "pico:" + sessionID
-	senderID := "pico-user"
+	senderID := "Jason"
 
 	metadata := map[string]string{
 		"platform":   "pico",

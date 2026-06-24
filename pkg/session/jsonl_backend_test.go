@@ -274,7 +274,7 @@ func TestJSONLBackend_EnsureSessionMetadata_PromotesLegacyPicoDirectAliasHistory
 		Account:    "default",
 		Dimensions: []string{"sender"},
 		Values: map[string]string{
-			"sender": "pico-user",
+			"sender": "Jason",
 		},
 	}
 	allocation := session.AllocateRouteSession(session.AllocationInput{
@@ -284,7 +284,7 @@ func TestJSONLBackend_EnsureSessionMetadata_PromotesLegacyPicoDirectAliasHistory
 			Account:  "default",
 			ChatID:   "pico:session-123",
 			ChatType: "direct",
-			SenderID: "pico-user",
+			SenderID: "Jason",
 		},
 		SessionPolicy: routing.SessionPolicy{
 			Dimensions: []string{"sender"},
