@@ -147,7 +147,7 @@ description: Restricted specialist
 ---
 # Agent
 
-Handle restricted work.
+Do not expose.
 `,
 	})
 	defer cleanupWorkspace(t, restrictedWorkspace)
@@ -191,24 +191,27 @@ Handle restricted work.
 		t.Fatal("expected messages")
 	}
 
-	systemPrompt := messages[0].Content
-	if !strings.Contains(systemPrompt, "# Agent Discovery") {
-		t.Fatalf("expected discovery section in system prompt, got %q", systemPrompt)
+	presetContext := presetContextMessage(t, messages).Content
+	if !strings.Contains(presetContext, "# Agent Discovery") {
+		t.Fatalf("expected discovery section in preset context, got %q", presetContext)
 	}
-	if strings.Contains(systemPrompt, `"id": "main"`) {
-		t.Fatalf("did not expect self descriptor in discovery section, got %q", systemPrompt)
+	if strings.Contains(messages[0].Content, "# Agent Discovery") {
+		t.Fatalf("did not expect discovery section in system prompt, got %q", messages[0].Content)
 	}
-	if !strings.Contains(systemPrompt, `"id": "research"`) ||
-		!strings.Contains(systemPrompt, `"description": "Research specialist"`) {
-		t.Fatalf("expected allowed peer descriptor in discovery section, got %q", systemPrompt)
+	if strings.Contains(presetContext, `"id": "main"`) {
+		t.Fatalf("did not expect self descriptor in discovery section, got %q", presetContext)
 	}
-	if strings.Contains(systemPrompt, `"id": "restricted"`) ||
-		strings.Contains(systemPrompt, `"description": "Restricted specialist"`) {
-		t.Fatalf("did not expect restricted peer descriptor in discovery section, got %q", systemPrompt)
+	if !strings.Contains(presetContext, `"id": "research"`) ||
+		!strings.Contains(presetContext, `"description": "Research specialist"`) {
+		t.Fatalf("expected allowed peer descriptor in discovery section, got %q", presetContext)
+	}
+	if strings.Contains(presetContext, `"id": "restricted"`) ||
+		strings.Contains(presetContext, `"description": "Restricted specialist"`) {
+		t.Fatalf("did not expect restricted peer descriptor in discovery section, got %q", presetContext)
 	}
 	for _, forbidden := range []string{`"current_agent_id"`, `"available_tools"`, `"model"`, `"channels"`, `"skills"`, `"mcpServers"`, `"tools"`} {
-		if strings.Contains(systemPrompt, forbidden) {
-			t.Fatalf("did not expect %s in discovery section, got %q", forbidden, systemPrompt)
+		if strings.Contains(presetContext, forbidden) {
+			t.Fatalf("did not expect %s in discovery section, got %q", forbidden, presetContext)
 		}
 	}
 }

@@ -5,96 +5,88 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"gopkg.in/yaml.v3"
 )
 
-//go:embed system_prompt_templates.json
+//go:embed system_prompt_templates.yaml
 var embeddedDefaultPromptTemplates []byte
 
 type PromptTemplates struct {
-	Identity          IdentityPromptTemplate       `json:"identity"`
-	ToolDiscoveryRule string                       `json:"tool_discovery_rule"`
-	SkillCatalog      SkillCatalogPromptTemplate   `json:"skill_catalog"`
-	Memory            SectionPromptTemplate        `json:"memory"`
-	MultiMessage      SectionPromptTemplate        `json:"multi_message"`
-	DynamicContext    DynamicContextPromptTemplate `json:"dynamic_context"`
-	Summary           SummaryPromptTemplate        `json:"summary"`
-	ActiveSkills      ActiveSkillsPromptTemplate   `json:"active_skills"`
-	ToolUseFallback   string                       `json:"tool_use_fallback"`
+	Identity          IdentityPromptTemplate       `json:"identity" yaml:"identity"`
+	ToolDiscoveryRule string                       `json:"tool_discovery_rule" yaml:"tool_discovery_rule"`
+	SkillCatalog      SkillCatalogPromptTemplate   `json:"skill_catalog" yaml:"skill_catalog"`
+	Memory            SectionPromptTemplate        `json:"memory" yaml:"memory"`
+	MultiMessage      SectionPromptTemplate        `json:"multi_message" yaml:"multi_message"`
+	DynamicContext    DynamicContextPromptTemplate `json:"dynamic_context" yaml:"dynamic_context"`
+	Summary           SummaryPromptTemplate        `json:"summary" yaml:"summary"`
+	ActiveSkills      ActiveSkillsPromptTemplate   `json:"active_skills" yaml:"active_skills"`
+	ToolUseFallback   string                       `json:"tool_use_fallback" yaml:"tool_use_fallback"`
 }
 
 type IdentityPromptTemplate struct {
-	Document string `json:"document"`
+	Document string `json:"document" yaml:"document"`
 	Rules    struct {
-		Accuracy          string `json:"accuracy"`
-		AccuracyWithTools string `json:"accuracy_with_tools"`
-		ContextSummaries  string `json:"context_summaries"`
-		Memory            string `json:"memory"`
-	} `json:"rules"`
+		Accuracy          string `json:"accuracy" yaml:"accuracy"`
+		AccuracyWithTools string `json:"accuracy_with_tools" yaml:"accuracy_with_tools"`
+		ContextSummaries  string `json:"context_summaries" yaml:"context_summaries"`
+		Memory            string `json:"memory" yaml:"memory"`
+	} `json:"rules" yaml:"rules"`
 }
 
 type SkillCatalogPromptTemplate struct {
-	Intro             string `json:"intro"`
-	IntroWithReadFile string `json:"intro_with_read_file"`
-	Document          string `json:"document"`
+	Intro             string `json:"intro" yaml:"intro"`
+	IntroWithReadFile string `json:"intro_with_read_file" yaml:"intro_with_read_file"`
+	Document          string `json:"document" yaml:"document"`
 }
 
 type SectionPromptTemplate struct {
-	Document string `json:"document"`
+	Document string `json:"document" yaml:"document"`
 }
 
 type DynamicContextPromptTemplate struct {
-	Document       string `json:"document"`
-	SenderLineBoth string `json:"sender_line_both"`
-	SenderLineName string `json:"sender_line_name"`
-	SenderLineID   string `json:"sender_line_id"`
+	Document       string `json:"document" yaml:"document"`
+	SenderLineBoth string `json:"sender_line_both" yaml:"sender_line_both"`
+	SenderLineName string `json:"sender_line_name" yaml:"sender_line_name"`
+	SenderLineID   string `json:"sender_line_id" yaml:"sender_line_id"`
 }
 
 type SummaryPromptTemplate struct {
-	Document string `json:"document"`
-	Prefix   string `json:"prefix"`
+	Document string `json:"document" yaml:"document"`
+	Prefix   string `json:"prefix" yaml:"prefix"`
 }
 
 type ActiveSkillsPromptTemplate struct {
-	Document string `json:"document"`
+	Document string `json:"document" yaml:"document"`
 }
 
 func workspacePromptTemplatesFilePath(workspace string) string {
 	if strings.TrimSpace(workspace) == "" {
 		return ""
 	}
-	return workspace + "/prompt_templates.json"
+	return filepath.Join(workspace, "prompt_templates.yaml")
 }
 
 func globalPromptTemplatesFilePath() string {
-	return config.GetHome() + "/prompt_templates.json"
+	return filepath.Join(config.GetHome(), "prompt_templates.yaml")
 }
 
 func promptTemplateTrackedPaths(workspace string) []string {
-	paths := []string{globalPromptTemplatesFilePath()}
-	if workspacePath := workspacePromptTemplatesFilePath(workspace); workspacePath != "" {
-		paths = append(paths, workspacePath)
-	}
-	return uniquePaths(paths)
+	return uniquePaths(promptTemplateCandidatePaths(workspace))
 }
 
 func loadPromptTemplates(workspace string) PromptTemplates {
-	paths := []string{}
-	if workspacePath := workspacePromptTemplatesFilePath(workspace); workspacePath != "" {
-		paths = append(paths, workspacePath)
-	}
-	paths = append(paths, globalPromptTemplatesFilePath())
-
-	for _, path := range paths {
+	for _, path := range promptTemplateCandidatePaths(workspace) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		var templates PromptTemplates
-		if err := json.Unmarshal(data, &templates); err != nil {
+		if err := decodePromptTemplates(path, data, &templates); err != nil {
 			logger.WarnCF("agent", "Failed to parse prompt templates", map[string]any{
 				"path":  path,
 				"error": err.Error(),
@@ -105,10 +97,37 @@ func loadPromptTemplates(workspace string) PromptTemplates {
 	}
 
 	var templates PromptTemplates
-	if err := json.Unmarshal(embeddedDefaultPromptTemplates, &templates); err != nil {
+	if err := yaml.Unmarshal(embeddedDefaultPromptTemplates, &templates); err != nil {
 		panic("embedded prompt templates invalid: " + err.Error())
 	}
 	return templates
+}
+
+func promptTemplateCandidatePaths(workspace string) []string {
+	paths := []string{}
+	if workspacePath := workspacePromptTemplatesFilePath(workspace); workspacePath != "" {
+		paths = append(paths,
+			workspacePath,
+			strings.TrimSuffix(workspacePath, ".yaml")+".yml",
+			strings.TrimSuffix(workspacePath, ".yaml")+".json",
+		)
+	}
+	globalPath := globalPromptTemplatesFilePath()
+	paths = append(paths,
+		globalPath,
+		strings.TrimSuffix(globalPath, ".yaml")+".yml",
+		strings.TrimSuffix(globalPath, ".yaml")+".json",
+	)
+	return uniquePaths(paths)
+}
+
+func decodePromptTemplates(path string, data []byte, out *PromptTemplates) error {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		return json.Unmarshal(data, out)
+	default:
+		return yaml.Unmarshal(data, out)
+	}
 }
 
 func renderTemplate(template string, data map[string]string) string {

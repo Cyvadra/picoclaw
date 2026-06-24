@@ -520,10 +520,10 @@ func TestProcessMessage_IncludesCurrentSenderInDynamicContext(t *testing.T) {
 		t.Fatal("provider did not receive any messages")
 	}
 
-	systemPrompt := provider.lastMessages[0].Content
+	presetContext := presetContextMessage(t, provider.lastMessages).Content
 	wantSender := "## Current Sender\nCurrent sender: Alice (ID: discord:123)"
-	if !strings.Contains(systemPrompt, wantSender) {
-		t.Fatalf("system prompt missing sender context %q:\n%s", wantSender, systemPrompt)
+	if !strings.Contains(presetContext, wantSender) {
+		t.Fatalf("preset context missing sender context %q:\n%s", wantSender, presetContext)
 	}
 
 	lastMessage := provider.lastMessages[len(provider.lastMessages)-1]
@@ -1070,12 +1070,12 @@ func TestProcessMessage_UseCommandLoadsRequestedSkill(t *testing.T) {
 		t.Fatal("provider did not receive any messages")
 	}
 
-	systemPrompt := provider.lastMessages[0].Content
-	if !strings.Contains(systemPrompt, "# Active Skills") {
-		t.Fatalf("system prompt missing active skills section:\n%s", systemPrompt)
+	presetContext := presetContextMessage(t, provider.lastMessages).Content
+	if !strings.Contains(presetContext, "# Active Skills") {
+		t.Fatalf("preset context missing active skills section:\n%s", presetContext)
 	}
-	if !strings.Contains(systemPrompt, "### Skill: shell") {
-		t.Fatalf("system prompt missing requested skill content:\n%s", systemPrompt)
+	if !strings.Contains(presetContext, "### Skill: shell") {
+		t.Fatalf("preset context missing requested skill content:\n%s", presetContext)
 	}
 
 	lastMessage := provider.lastMessages[len(provider.lastMessages)-1]
@@ -1141,12 +1141,12 @@ func TestProcessMessage_BtwCommandRunsWithoutPersistingHistory(t *testing.T) {
 	if len(provider.lastMessages) == 0 {
 		t.Fatal("provider did not receive any messages")
 	}
-	if len(provider.lastMessages) != 4 {
-		t.Fatalf("provider messages len = %d, want 4 (system + prior history + user)", len(provider.lastMessages))
+	if len(provider.lastMessages) != 5 {
+		t.Fatalf("provider messages len = %d, want 5 (system + preset context + prior history + user)", len(provider.lastMessages))
 	}
 
-	if !reflect.DeepEqual(provider.lastMessages[1:3], initialHistory) {
-		t.Fatalf("provider history = %#v, want %#v", provider.lastMessages[1:3], initialHistory)
+	if !reflect.DeepEqual(provider.lastMessages[2:4], initialHistory) {
+		t.Fatalf("provider history = %#v, want %#v", provider.lastMessages[2:4], initialHistory)
 	}
 
 	lastMessage := provider.lastMessages[len(provider.lastMessages)-1]
@@ -1198,12 +1198,12 @@ func TestProcessMessage_BtwCommandIncludesRequestContextAndMedia(t *testing.T) {
 		t.Fatal("provider did not receive any messages")
 	}
 
-	systemPrompt := provider.lastMessages[0].Content
-	if !strings.Contains(systemPrompt, "## Current Session\nChannel: discord\nChat ID: group-1") {
-		t.Fatalf("system prompt missing current session context:\n%s", systemPrompt)
+	presetContext := presetContextMessage(t, provider.lastMessages).Content
+	if !strings.Contains(presetContext, "## Current Session\nChannel: discord\nChat ID: group-1") {
+		t.Fatalf("preset context missing current session context:\n%s", presetContext)
 	}
-	if !strings.Contains(systemPrompt, "## Current Sender\nCurrent sender: Alice (ID: discord:123)") {
-		t.Fatalf("system prompt missing current sender context:\n%s", systemPrompt)
+	if !strings.Contains(presetContext, "## Current Sender\nCurrent sender: Alice (ID: discord:123)") {
+		t.Fatalf("preset context missing current sender context:\n%s", presetContext)
 	}
 
 	lastMessage := provider.lastMessages[len(provider.lastMessages)-1]
@@ -1501,9 +1501,9 @@ func TestProcessMessage_UseCommandArmsSkillForNextMessage(t *testing.T) {
 		t.Fatal("provider did not receive any messages")
 	}
 
-	systemPrompt := provider.lastMessages[0].Content
-	if !strings.Contains(systemPrompt, "### Skill: shell") {
-		t.Fatalf("system prompt missing pending skill content:\n%s", systemPrompt)
+	presetContext := presetContextMessage(t, provider.lastMessages).Content
+	if !strings.Contains(presetContext, "### Skill: shell") {
+		t.Fatalf("preset context missing pending skill content:\n%s", presetContext)
 	}
 	lastMessage := provider.lastMessages[len(provider.lastMessages)-1]
 	if lastMessage.Role != "user" || lastMessage.Content != "explain how to list files" {

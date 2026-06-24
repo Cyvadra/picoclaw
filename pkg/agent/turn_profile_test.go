@@ -125,14 +125,17 @@ func TestTurnProfile_DisabledPreservesDefaultHistoryAndPrompt(t *testing.T) {
 	if got != "profile response" {
 		t.Fatalf("runAgentLoop() = %q, want profile response", got)
 	}
-	if len(provider.messages) != 4 {
-		t.Fatalf("provider messages len = %d, want system + history + user", len(provider.messages))
+	if len(provider.messages) != 5 {
+		t.Fatalf("provider messages len = %d, want system + preset context + history + user", len(provider.messages))
 	}
-	if !reflect.DeepEqual(provider.messages[1:3], initialHistory) {
-		t.Fatalf("provider history = %#v, want %#v", provider.messages[1:3], initialHistory)
+	if !reflect.DeepEqual(provider.messages[2:4], initialHistory) {
+		t.Fatalf("provider history = %#v, want %#v", provider.messages[2:4], initialHistory)
 	}
-	if !strings.Contains(provider.messages[0].Content, "CONTEXT_SUMMARY") {
-		t.Fatalf("system prompt missing summary in default mode:\n%s", provider.messages[0].Content)
+	if strings.Contains(provider.messages[0].Content, "CONTEXT_SUMMARY") {
+		t.Fatalf("system prompt includes summary in default mode:\n%s", provider.messages[0].Content)
+	}
+	if !strings.Contains(presetContextMessage(t, provider.messages).Content, "CONTEXT_SUMMARY") {
+		t.Fatalf("preset context missing summary in default mode:\n%s", presetContextMessage(t, provider.messages).Content)
 	}
 	history := agent.Sessions.GetHistory(sessionKey)
 	if len(history) != len(initialHistory)+2 {
@@ -172,14 +175,14 @@ func TestTurnProfile_HistoryOffSuppressesHistoryAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAgentLoop() error = %v", err)
 	}
-	if len(provider.messages) != 2 {
-		t.Fatalf("provider messages len = %d, want system + current user", len(provider.messages))
+	if len(provider.messages) != 3 {
+		t.Fatalf("provider messages len = %d, want system + preset context + current user", len(provider.messages))
 	}
-	if provider.messages[1].Content != "new user" {
-		t.Fatalf("current message = %q, want new user", provider.messages[1].Content)
+	if provider.messages[2].Content != "new user" {
+		t.Fatalf("current message = %q, want new user", provider.messages[2].Content)
 	}
-	if strings.Contains(provider.messages[0].Content, "old summary") {
-		t.Fatalf("system prompt includes suppressed summary:\n%s", provider.messages[0].Content)
+	if strings.Contains(presetContextMessage(t, provider.messages).Content, "old summary") {
+		t.Fatalf("preset context includes suppressed summary:\n%s", presetContextMessage(t, provider.messages).Content)
 	}
 	history := agent.Sessions.GetHistory(sessionKey)
 	if !reflect.DeepEqual(history, initialHistory) {
@@ -213,11 +216,11 @@ func TestTurnProfile_ProcessMessageUsesEnabledTurnProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processMessage() error = %v", err)
 	}
-	if len(provider.messages) != 2 {
-		t.Fatalf("provider messages len = %d, want system + current user", len(provider.messages))
+	if len(provider.messages) != 3 {
+		t.Fatalf("provider messages len = %d, want system + preset context + current user", len(provider.messages))
 	}
-	if provider.messages[1].Content != "hello from pico" {
-		t.Fatalf("current message = %q, want hello from pico", provider.messages[1].Content)
+	if provider.messages[2].Content != "hello from pico" {
+		t.Fatalf("current message = %q, want hello from pico", provider.messages[2].Content)
 	}
 }
 
@@ -611,7 +614,7 @@ func TestTurnProfile_SkillsOffAndCustomControlCatalogAndActiveSkills(t *testing.
 	if err != nil {
 		t.Fatalf("runAgentLoop(shell-only) error = %v", err)
 	}
-	customPrompt := provider.messages[0].Content
+	customPrompt := presetContextMessage(t, provider.messages).Content
 	if !strings.Contains(customPrompt, "<name>shell</name>") ||
 		!strings.Contains(customPrompt, "### Skill: shell") {
 		t.Fatalf("custom skills prompt missing allowed shell context:\n%s", customPrompt)

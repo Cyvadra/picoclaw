@@ -3,9 +3,44 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+func TestLoadPromptTemplates_EmbeddedYAML(t *testing.T) {
+	templates := loadPromptTemplates(t.TempDir())
+	if !strings.Contains(templates.Identity.Document, "Act like a helpful assistant") {
+		t.Fatalf("embedded identity template not loaded: %q", templates.Identity.Document)
+	}
+	if templates.DynamicContext.SenderLineBoth == "" {
+		t.Fatal("embedded dynamic context sender template should be loaded")
+	}
+}
+
+func TestLoadPromptTemplates_WorkspaceYAMLOverride(t *testing.T) {
+	workspace := t.TempDir()
+	writePromptTestFile(t, workspace, "prompt_templates.yaml", minimalPromptTemplateYAML("workspace yaml identity"))
+
+	templates := loadPromptTemplates(workspace)
+	if templates.Identity.Document != "workspace yaml identity" {
+		t.Fatalf("Identity.Document = %q, want workspace yaml override", templates.Identity.Document)
+	}
+}
+
+func TestLoadPromptTemplates_WorkspaceJSONOverrideCompatibility(t *testing.T) {
+	workspace := t.TempDir()
+	writePromptTestFile(t, workspace, "prompt_templates.json", minimalPromptTemplateJSON(t, "workspace json identity"))
+
+	templates := loadPromptTemplates(workspace)
+	if templates.Identity.Document != "workspace json identity" {
+		t.Fatalf("Identity.Document = %q, want workspace json override", templates.Identity.Document)
+	}
+}
 
 func TestPromptRegistry_RejectsRegisteredSourceWrongPlacement(t *testing.T) {
 	registry := NewPromptRegistry()
@@ -83,6 +118,65 @@ func TestRenderPromptPartsLegacy_UsesLayerAndSlotOrder(t *testing.T) {
 	}
 }
 
+func TestPromptSizeBreakdown_UsesRenderedOrderAndSeparators(t *testing.T) {
+	parts := []PromptPart{
+		{
+			ID:      "context.runtime",
+			Layer:   PromptLayerContext,
+			Slot:    PromptSlotRuntime,
+			Source:  PromptSource{ID: PromptSourceRuntime},
+			Content: "runtime",
+		},
+		{
+			ID:      "kernel.identity",
+			Layer:   PromptLayerKernel,
+			Slot:    PromptSlotIdentity,
+			Source:  PromptSource{ID: PromptSourceKernel},
+			Content: "kernel",
+		},
+		{
+			ID:      "empty.part",
+			Layer:   PromptLayerInstruction,
+			Slot:    PromptSlotWorkspace,
+			Source:  PromptSource{ID: PromptSourceWorkspace},
+			Content: "   ",
+		},
+	}
+
+	breakdown := promptSizeBreakdown(parts)
+	wantTotal := len("kernel") + len("runtime") + len("\n\n---\n\n")
+	if breakdown.TotalChars != wantTotal {
+		t.Fatalf("TotalChars = %d, want %d", breakdown.TotalChars, wantTotal)
+	}
+	if len(breakdown.Parts) != 2 {
+		t.Fatalf("parts len = %d, want 2", len(breakdown.Parts))
+	}
+	if breakdown.Parts[0].ID != "kernel.identity" || breakdown.Parts[1].ID != "context.runtime" {
+		t.Fatalf("parts order = %#v, want rendered order", breakdown.Parts)
+	}
+	if breakdown.Parts[0].TokenApprox != 3 {
+		t.Fatalf("kernel TokenApprox = %d, want 3", breakdown.Parts[0].TokenApprox)
+	}
+}
+
+func TestPromptSizeBreakdown_LogFieldsSanitizePromptKeys(t *testing.T) {
+	breakdown := promptSizeBreakdown([]PromptPart{{
+		ID:      "capability.mcp.github",
+		Layer:   PromptLayerCapability,
+		Slot:    PromptSlotMCP,
+		Source:  PromptSource{ID: "mcp:github-server"},
+		Content: "connected",
+	}})
+
+	fields := breakdown.LogFields("system_prompt")
+	if fields["system_prompt_chars"] != len("connected") {
+		t.Fatalf("system_prompt_chars = %#v, want %d", fields["system_prompt_chars"], len("connected"))
+	}
+	if fields["system_prompt_capability_mcp_mcp_github_server_chars"] != len("connected") {
+		t.Fatalf("sanitized part chars missing from fields: %#v", fields)
+	}
+}
+
 func TestBuildMessagesFromPrompt_IncludesSystemPromptOverlay(t *testing.T) {
 	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
 	cb := NewContextBuilder(t.TempDir())
@@ -103,8 +197,9 @@ func TestBuildMessagesFromPrompt_IncludesSystemPromptOverlay(t *testing.T) {
 	if !strings.Contains(messages[0].Content, "Use child-only system instructions.") {
 		t.Fatalf("system prompt missing overlay: %q", messages[0].Content)
 	}
-	if messages[1].Role != "user" || messages[1].Content != "do child task" {
-		t.Fatalf("messages[1] = %#v, want user task", messages[1])
+	last := messages[len(messages)-1]
+	if last.Role != "user" || last.Content != "do child task" {
+		t.Fatalf("last message = %#v, want user task", last)
 	}
 }
 
@@ -116,13 +211,13 @@ func TestBuildMessagesFromPrompt_AttachesInternalPromptMetadata(t *testing.T) {
 		CurrentMessage: "hello",
 		Summary:        "prior context",
 	})
-	if len(messages) != 2 {
-		t.Fatalf("messages len = %d, want 2", len(messages))
+	if len(messages) != 3 {
+		t.Fatalf("messages len = %d, want 3", len(messages))
 	}
 
 	system := messages[0]
-	if len(system.SystemParts) < 3 {
-		t.Fatalf("system parts len = %d, want at least 3", len(system.SystemParts))
+	if len(system.SystemParts) != 1 {
+		t.Fatalf("system parts len = %d, want identity only", len(system.SystemParts))
 	}
 	if system.SystemParts[0].PromptLayer != string(PromptLayerKernel) ||
 		system.SystemParts[0].PromptSlot != string(PromptSlotIdentity) ||
@@ -130,29 +225,15 @@ func TestBuildMessagesFromPrompt_AttachesInternalPromptMetadata(t *testing.T) {
 		t.Fatalf("static system metadata = %#v, want kernel identity", system.SystemParts[0])
 	}
 
-	var hasRuntime, hasSummary bool
-	for _, part := range system.SystemParts {
-		switch part.PromptSource {
-		case string(PromptSourceRuntime):
-			hasRuntime = true
-			if part.CacheControl != nil {
-				t.Fatalf("runtime cache control = %#v, want nil", part.CacheControl)
-			}
-		case string(PromptSourceSummary):
-			hasSummary = true
-			if part.CacheControl != nil {
-				t.Fatalf("summary cache control = %#v, want nil", part.CacheControl)
-			}
-		}
+	preset := presetContextMessage(t, messages)
+	if !strings.Contains(preset.Content, "## Current Time") {
+		t.Fatalf("preset context missing runtime context: %q", preset.Content)
 	}
-	if !hasRuntime {
-		t.Fatal("system parts missing runtime prompt metadata")
-	}
-	if !hasSummary {
-		t.Fatal("system parts missing summary prompt metadata")
+	if !strings.Contains(preset.Content, "prior context") {
+		t.Fatalf("preset context missing summary context: %q", preset.Content)
 	}
 
-	user := messages[1]
+	user := messages[2]
 	if user.PromptLayer != string(PromptLayerTurn) ||
 		user.PromptSlot != string(PromptSlotMessage) ||
 		user.PromptSource != string(PromptSourceUserMessage) {
@@ -168,6 +249,14 @@ func TestBuildMessagesFromPrompt_AttachesInternalPromptMetadata(t *testing.T) {
 		strings.Contains(string(data), "PromptSlot") {
 		t.Fatalf("internal prompt metadata leaked into JSON: %s", data)
 	}
+
+	breakdown := promptSizeBreakdownFromContentBlocks(system.SystemParts)
+	if breakdown.TotalChars <= 0 {
+		t.Fatal("system prompt size breakdown should include prompt content")
+	}
+	if len(breakdown.Parts) != len(system.SystemParts) {
+		t.Fatalf("breakdown parts len = %d, want %d", len(breakdown.Parts), len(system.SystemParts))
+	}
 }
 
 func TestContextBuilder_CollectsToolDiscoveryContributor(t *testing.T) {
@@ -175,25 +264,12 @@ func TestContextBuilder_CollectsToolDiscoveryContributor(t *testing.T) {
 	cb := NewContextBuilder(t.TempDir()).WithToolDiscovery(true, false)
 
 	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	system := messages[0]
-	if !strings.Contains(system.Content, "tool_search_tool_bm25") {
-		t.Fatalf("system prompt missing tool discovery rule: %q", system.Content)
+	preset := presetContextMessage(t, messages)
+	if !strings.Contains(preset.Content, "tool_search_tool_bm25") {
+		t.Fatalf("preset context missing tool discovery rule: %q", preset.Content)
 	}
-
-	var found bool
-	for _, part := range system.SystemParts {
-		if part.PromptSource == string(PromptSourceToolDiscovery) {
-			found = true
-			if part.PromptLayer != string(PromptLayerCapability) || part.PromptSlot != string(PromptSlotTooling) {
-				t.Fatalf("tool discovery metadata = %#v, want capability/tooling", part)
-			}
-			if part.CacheControl == nil || part.CacheControl.Type != "ephemeral" {
-				t.Fatalf("tool discovery cache control = %#v, want ephemeral", part.CacheControl)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("system parts missing tool discovery prompt metadata")
+	if strings.Contains(messages[0].Content, "tool_search_tool_bm25") {
+		t.Fatalf("system prompt includes tool discovery rule: %q", messages[0].Content)
 	}
 }
 
@@ -205,14 +281,9 @@ func TestContextBuilder_SuppressesToolDiscoveryContributorWhenToolsUnavailable(t
 		CurrentMessage:      "hello",
 		SuppressToolUseRule: true,
 	})
-	system := messages[0]
-	if strings.Contains(system.Content, "tool_search_tool_bm25") {
-		t.Fatalf("system prompt includes tool discovery despite tools being unavailable: %q", system.Content)
-	}
-	for _, part := range system.SystemParts {
-		if part.PromptSource == string(PromptSourceToolDiscovery) {
-			t.Fatalf("system parts include tool discovery despite tools being unavailable: %#v", part)
-		}
+	preset := presetContextMessage(t, messages)
+	if strings.Contains(preset.Content, "tool_search_tool_bm25") {
+		t.Fatalf("preset context includes tool discovery despite tools being unavailable: %q", preset.Content)
 	}
 }
 
@@ -231,14 +302,14 @@ func TestContextBuilder_SuppressesToolReferencesWhenToolsUnavailable(t *testing.
 		CurrentMessage:      "hello",
 		SuppressToolUseRule: true,
 	})
-	system := messages[0]
-	if strings.Contains(system.Content, "When using tools") ||
-		strings.Contains(system.Content, "read_file tool") ||
-		strings.Contains(system.Content, "update "+workspace+"/memory/MEMORY.md") {
-		t.Fatalf("system prompt includes tool references despite tools being unavailable: %q", system.Content)
+	preset := presetContextMessage(t, messages)
+	if strings.Contains(preset.Content, "When using tools") ||
+		strings.Contains(preset.Content, "read_file tool") ||
+		strings.Contains(preset.Content, "update "+workspace+"/memory/MEMORY.md") {
+		t.Fatalf("preset context includes tool references despite tools being unavailable: %q", preset.Content)
 	}
-	if !strings.Contains(system.Content, "<name>research</name>") {
-		t.Fatalf("system prompt should keep non-tool skill catalog context, got: %q", system.Content)
+	if !strings.Contains(preset.Content, "<name>research</name>") {
+		t.Fatalf("preset context should keep non-tool skill catalog context, got: %q", preset.Content)
 	}
 }
 
@@ -257,12 +328,71 @@ func TestContextBuilder_CustomToolAllowListSuppressesReadFileSkillInstruction(t 
 		CurrentMessage: "hello",
 		AllowedTools:   []string{"web_search"},
 	})
-	system := messages[0]
-	if strings.Contains(system.Content, "read_file tool") {
-		t.Fatalf("system prompt includes read_file skill instruction without read_file permission: %q", system.Content)
+	preset := presetContextMessage(t, messages)
+	if strings.Contains(preset.Content, "read_file tool") {
+		t.Fatalf("preset context includes read_file skill instruction without read_file permission: %q", preset.Content)
 	}
-	if !strings.Contains(system.Content, "<name>research</name>") {
-		t.Fatalf("system prompt should keep skill catalog context, got: %q", system.Content)
+	if !strings.Contains(preset.Content, "<name>research</name>") {
+		t.Fatalf("preset context should keep skill catalog context, got: %q", preset.Content)
+	}
+}
+
+func TestContextBuilder_DefaultContextLoadingKeepsBootstrapAndMemory(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	writePromptTestFile(t, workspace, "AGENT.md", "Always answer with workspace instructions.")
+	writePromptTestFile(t, workspace, filepath.Join("memory", "MEMORY.md"), "User likes concise responses.")
+	cb := NewContextBuilder(workspace)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	preset := presetContextMessage(t, messages)
+	if !strings.Contains(preset.Content, "Always answer with workspace instructions.") {
+		t.Fatalf("preset context missing eager bootstrap content: %q", preset.Content)
+	}
+	if !strings.Contains(preset.Content, "User likes concise responses.") {
+		t.Fatalf("preset context missing eager memory content: %q", preset.Content)
+	}
+	if strings.Contains(messages[0].Content, "Always answer with workspace instructions.") ||
+		strings.Contains(messages[0].Content, "User likes concise responses.") {
+		t.Fatalf("system prompt includes variable context: %q", messages[0].Content)
+	}
+}
+
+func TestContextBuilder_DeferredContextLoadingSkipsBootstrapAndMemory(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	writePromptTestFile(t, workspace, "AGENT.md", "Always answer with workspace instructions.")
+	writePromptTestFile(t, workspace, filepath.Join("memory", "MEMORY.md"), "User likes concise responses.")
+	cb := NewContextBuilder(workspace)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{
+		CurrentMessage: "hello",
+		ContextLoading: PromptContextLoadingPolicy{
+			Bootstrap: PromptContextLoadingDeferred,
+			Memory:    PromptContextLoadingDeferred,
+		},
+	})
+	preset := presetContextMessage(t, messages)
+	if strings.Contains(preset.Content, "Always answer with workspace instructions.") {
+		t.Fatalf("preset context includes deferred bootstrap content: %q", preset.Content)
+	}
+	if strings.Contains(preset.Content, "User likes concise responses.") {
+		t.Fatalf("preset context includes deferred memory content: %q", preset.Content)
+	}
+	if !strings.Contains(preset.Content, "# Deferred Workspace Context") ||
+		!strings.Contains(preset.Content, "AGENT.md") {
+		t.Fatalf("preset context missing deferred workspace manifest: %q", preset.Content)
+	}
+	if !strings.Contains(preset.Content, "# Deferred Memory Context") ||
+		!strings.Contains(preset.Content, "memory/MEMORY.md") {
+		t.Fatalf("preset context missing deferred memory manifest: %q", preset.Content)
+	}
+	if !strings.Contains(messages[0].Content, "Act like a helpful assistant.") {
+		t.Fatalf("system prompt should keep identity content: %q", messages[0].Content)
+	}
+	last := messages[len(messages)-1]
+	if last.Role != "user" || last.Content != "hello" {
+		t.Fatalf("last message = %#v, want user hello", last)
 	}
 }
 
@@ -279,26 +409,101 @@ func TestContextBuilder_CollectsMCPServerContributor(t *testing.T) {
 	}
 
 	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	system := messages[0]
-	if !strings.Contains(system.Content, "MCP server `GitHub Server` is connected") {
-		t.Fatalf("system prompt missing MCP contributor content: %q", system.Content)
+	preset := presetContextMessage(t, messages)
+	if !strings.Contains(preset.Content, "MCP server `GitHub Server` is connected") {
+		t.Fatalf("preset context missing MCP contributor content: %q", preset.Content)
 	}
+	if strings.Contains(messages[0].Content, "MCP server `GitHub Server` is connected") {
+		t.Fatalf("system prompt includes MCP contributor content: %q", messages[0].Content)
+	}
+}
 
-	var found bool
-	for _, part := range system.SystemParts {
-		if part.PromptSource == "mcp:github_server" {
-			found = true
-			if part.PromptLayer != string(PromptLayerCapability) || part.PromptSlot != string(PromptSlotMCP) {
-				t.Fatalf("mcp metadata = %#v, want capability/mcp", part)
-			}
-			if part.CacheControl == nil || part.CacheControl.Type != "ephemeral" {
-				t.Fatalf("mcp cache control = %#v, want ephemeral", part.CacheControl)
-			}
-		}
+func writePromptTestFile(t *testing.T, workspace, name, body string) {
+	t.Helper()
+	path := filepath.Join(workspace, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir prompt test file: %v", err)
 	}
-	if !found {
-		t.Fatal("system parts missing MCP prompt metadata")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write prompt test file: %v", err)
 	}
+}
+
+func minimalPromptTemplateYAML(identity string) string {
+	return fmt.Sprintf(`identity:
+  document: %q
+  rules:
+    accuracy: accuracy
+    accuracy_with_tools: accuracy with tools
+    context_summaries: context summaries
+    memory: memory
+tool_discovery_rule: tool discovery {{tool_names}}
+skill_catalog:
+  intro: skills
+  intro_with_read_file: skills read file
+  document: "# Skills\n\n{{intro}}\n\n{{skills_summary}}"
+memory:
+  document: "# Memory\n\n{{memory_context}}"
+multi_message:
+  document: multi message
+dynamic_context:
+  document: "## Current Time\n{{now}}\n\n## Runtime\n{{runtime}}{{channel_block}}{{sender_block}}"
+  sender_line_both: "Current sender: %%s (ID: %%s)"
+  sender_line_name: "Current sender: %%s"
+  sender_line_id: "Current sender: %%s"
+summary:
+  document: "CONTEXT_SUMMARY: {{summary}}"
+  prefix: "CONTEXT_SUMMARY: "
+active_skills:
+  document: "# Active Skills\n\n{{content}}"
+tool_use_fallback: tool use fallback
+`, identity)
+}
+
+func minimalPromptTemplateJSON(t *testing.T, identity string) string {
+	t.Helper()
+	templates := map[string]any{
+		"identity": map[string]any{
+			"document": identity,
+			"rules": map[string]string{
+				"accuracy":            "accuracy",
+				"accuracy_with_tools": "accuracy with tools",
+				"context_summaries":   "context summaries",
+				"memory":              "memory",
+			},
+		},
+		"tool_discovery_rule": "tool discovery {{tool_names}}",
+		"skill_catalog": map[string]string{
+			"intro":                "skills",
+			"intro_with_read_file": "skills read file",
+			"document":             "# Skills\n\n{{intro}}\n\n{{skills_summary}}",
+		},
+		"memory": map[string]string{
+			"document": "# Memory\n\n{{memory_context}}",
+		},
+		"multi_message": map[string]string{
+			"document": "multi message",
+		},
+		"dynamic_context": map[string]string{
+			"document":         "## Current Time\n{{now}}\n\n## Runtime\n{{runtime}}{{channel_block}}{{sender_block}}",
+			"sender_line_both": "Current sender: %s (ID: %s)",
+			"sender_line_name": "Current sender: %s",
+			"sender_line_id":   "Current sender: %s",
+		},
+		"summary": map[string]string{
+			"document": "CONTEXT_SUMMARY: {{summary}}",
+			"prefix":   "CONTEXT_SUMMARY: ",
+		},
+		"active_skills": map[string]string{
+			"document": "# Active Skills\n\n{{content}}",
+		},
+		"tool_use_fallback": "tool use fallback",
+	}
+	data, err := json.Marshal(templates)
+	if err != nil {
+		t.Fatalf("marshal minimal prompt template json: %v", err)
+	}
+	return string(data)
 }
 
 func TestContextBuilder_SuppressesMCPServerContributorWhenToolsUnavailable(t *testing.T) {
@@ -317,15 +522,10 @@ func TestContextBuilder_SuppressesMCPServerContributorWhenToolsUnavailable(t *te
 		CurrentMessage:      "hello",
 		SuppressToolUseRule: true,
 	})
-	system := messages[0]
-	if strings.Contains(system.Content, "MCP server `GitHub Server` is connected") ||
-		strings.Contains(system.Content, "available as native tools") {
-		t.Fatalf("system prompt includes MCP tooling despite tools being unavailable: %q", system.Content)
-	}
-	for _, part := range system.SystemParts {
-		if part.PromptSource == "mcp:github_server" {
-			t.Fatalf("system parts include MCP tooling despite tools being unavailable: %#v", part)
-		}
+	preset := presetContextMessage(t, messages)
+	if strings.Contains(preset.Content, "MCP server `GitHub Server` is connected") ||
+		strings.Contains(preset.Content, "available as native tools") {
+		t.Fatalf("preset context includes MCP tooling despite tools being unavailable: %q", preset.Content)
 	}
 }
 
@@ -346,15 +546,10 @@ func TestContextBuilder_SuppressesAgentDiscoveryContributorWhenToolsUnavailable(
 		CurrentMessage:      "hello",
 		SuppressToolUseRule: true,
 	})
-	system := messages[0]
-	if strings.Contains(system.Content, "Agent Discovery") ||
-		strings.Contains(system.Content, "calling spawn") {
-		t.Fatalf("system prompt includes agent discovery despite tools being unavailable: %q", system.Content)
-	}
-	for _, part := range system.SystemParts {
-		if part.PromptSource == string(PromptSourceAgentDiscovery) {
-			t.Fatalf("system parts include agent discovery despite tools being unavailable: %#v", part)
-		}
+	preset := presetContextMessage(t, messages)
+	if strings.Contains(preset.Content, "Agent Discovery") ||
+		strings.Contains(preset.Content, "calling spawn") {
+		t.Fatalf("preset context includes agent discovery despite tools being unavailable: %q", preset.Content)
 	}
 }
 
@@ -385,7 +580,7 @@ func TestContextBuilder_CustomToolAllowListSuppressesUnallowedToolContributors(t
 		CurrentMessage: "hello",
 		AllowedTools:   []string{"echo_text"},
 	})
-	system := messages[0]
+	preset := presetContextMessage(t, messages)
 	blockedSnippets := []string{
 		"tool_search_tool_bm25",
 		"tool_search_tool_regex",
@@ -394,14 +589,8 @@ func TestContextBuilder_CustomToolAllowListSuppressesUnallowedToolContributors(t
 		"calling spawn",
 	}
 	for _, snippet := range blockedSnippets {
-		if strings.Contains(system.Content, snippet) {
-			t.Fatalf("system prompt includes unallowed tool contributor %q: %q", snippet, system.Content)
-		}
-	}
-	for _, part := range system.SystemParts {
-		switch part.PromptSource {
-		case string(PromptSourceToolDiscovery), string(PromptSourceAgentDiscovery), "mcp:github_server":
-			t.Fatalf("system parts include unallowed tool contributor: %#v", part)
+		if strings.Contains(preset.Content, snippet) {
+			t.Fatalf("preset context includes unallowed tool contributor %q: %q", snippet, preset.Content)
 		}
 	}
 }
@@ -443,7 +632,22 @@ func TestContextBuilder_CollectsRegisteredPromptContributors(t *testing.T) {
 	}
 
 	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	if !strings.Contains(messages[0].Content, "registered contributor prompt") {
-		t.Fatalf("system prompt missing contributor content: %q", messages[0].Content)
+	preset := presetContextMessage(t, messages)
+	if !strings.Contains(preset.Content, "registered contributor prompt") {
+		t.Fatalf("preset context missing contributor content: %q", preset.Content)
 	}
+	if strings.Contains(messages[0].Content, "registered contributor prompt") {
+		t.Fatalf("system prompt includes contributor content: %q", messages[0].Content)
+	}
+}
+
+func presetContextMessage(t *testing.T, messages []providers.Message) providers.Message {
+	t.Helper()
+	for _, msg := range messages {
+		if msg.Role == "user" && msg.PromptSource == string(PromptSourceRuntime) {
+			return msg
+		}
+	}
+	t.Fatalf("missing preset context message in %#v", messages)
+	return providers.Message{}
 }

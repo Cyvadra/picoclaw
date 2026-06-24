@@ -100,25 +100,33 @@ func TestSingleSystemMessage(t *testing.T) {
 				t.Errorf("last message should be user, got %s", msgs[len(msgs)-1].Role)
 			}
 
-			// System message must contain identity (static) and time (dynamic)
+			// System message contains only the minimal identity. Dynamic and
+			// variable context is injected as preset user context.
 			sys := msgs[0].Content
-			if !strings.Contains(sys, "picoclaw") {
+			if !strings.Contains(sys, "Act like a helpful assistant") {
 				t.Error("system message missing identity")
 			}
-			if !strings.Contains(sys, "Current Time") {
-				t.Error("system message missing dynamic time context")
+			if strings.Contains(sys, "Current Time") {
+				t.Error("system message should not contain dynamic time context")
+			}
+			preset := presetContextMessage(t, msgs).Content
+			if !strings.Contains(preset, "Current Time") {
+				t.Error("preset context missing dynamic time context")
 			}
 
 			// Summary handling
 			if tt.summary != "" {
-				if !strings.Contains(sys, "CONTEXT_SUMMARY:") {
+				if strings.Contains(sys, "CONTEXT_SUMMARY:") {
+					t.Error("summary should not appear in system message")
+				}
+				if !strings.Contains(preset, "CONTEXT_SUMMARY:") {
 					t.Error("summary present but CONTEXT_SUMMARY prefix missing")
 				}
-				if !strings.Contains(sys, tt.summary[:20]) {
-					t.Error("summary content not found in system message")
+				if !strings.Contains(preset, tt.summary[:20]) {
+					t.Error("summary content not found in preset context")
 				}
 			} else {
-				if strings.Contains(sys, "CONTEXT_SUMMARY:") {
+				if strings.Contains(preset, "CONTEXT_SUMMARY:") {
 					t.Error("CONTEXT_SUMMARY should not appear without summary")
 				}
 			}
@@ -169,20 +177,20 @@ func TestBuildMessages_CurrentSenderDynamicContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			msgs := cb.BuildMessages(nil, "", "hello", nil, "discord", "chat1", tt.senderID, tt.senderDisplayName)
-			sys := msgs[0].Content
+			preset := presetContextMessage(t, msgs).Content
 
 			if tt.wantSection {
-				if !strings.Contains(sys, "## Current Sender") {
-					t.Fatalf("system prompt missing Current Sender section:\n%s", sys)
+				if !strings.Contains(preset, "## Current Sender") {
+					t.Fatalf("preset context missing Current Sender section:\n%s", preset)
 				}
-				if !strings.Contains(sys, tt.wantLine) {
-					t.Fatalf("system prompt missing sender line %q:\n%s", tt.wantLine, sys)
+				if !strings.Contains(preset, tt.wantLine) {
+					t.Fatalf("preset context missing sender line %q:\n%s", tt.wantLine, preset)
 				}
 				return
 			}
 
-			if strings.Contains(sys, "## Current Sender") {
-				t.Fatalf("system prompt should omit Current Sender section:\n%s", sys)
+			if strings.Contains(preset, "## Current Sender") {
+				t.Fatalf("preset context should omit Current Sender section:\n%s", preset)
 			}
 		})
 	}
@@ -241,13 +249,13 @@ func TestMtimeAutoInvalidation(t *testing.T) {
 				t.Fatalf("sourceFilesChangedLocked() should detect %s change", tt.file)
 			}
 
-			// Should auto-rebuild without explicit InvalidateCache()
+			// Should auto-rebuild without explicit InvalidateCache(). Variable
+			// workspace and memory content is no longer part of the cached system
+			// prompt; the cache still tracks these files so preset context can be
+			// rebuilt from fresh inputs.
 			sp2 := cb.BuildSystemPromptWithCache()
-			if sp1 == sp2 {
-				t.Errorf("cache not rebuilt after %s change", tt.file)
-			}
-			if !strings.Contains(sp2, tt.checkField) {
-				t.Errorf("rebuilt prompt missing expected content %q", tt.checkField)
+			if strings.Contains(sp1, tt.checkField) || strings.Contains(sp2, tt.checkField) {
+				t.Errorf("system prompt should not contain variable context %q", tt.checkField)
 			}
 		})
 	}
@@ -379,10 +387,12 @@ func TestNewFileCreationInvalidatesCache(t *testing.T) {
 			future := time.Now().Add(2 * time.Second)
 			os.Chtimes(fullPath, future, future)
 
-			// Cache should auto-invalidate because file went from absent -> present
+			// Cache should auto-invalidate because file went from absent -> present.
+			// The rebuilt system prompt remains minimal and should not include the
+			// new variable context body.
 			sp2 := cb.BuildSystemPromptWithCache()
-			if !strings.Contains(sp2, tt.checkField) {
-				t.Errorf("cache not invalidated on new file creation: expected %q in prompt", tt.checkField)
+			if strings.Contains(sp2, tt.checkField) {
+				t.Errorf("system prompt should not contain new variable context %q", tt.checkField)
 			}
 		})
 	}
@@ -409,8 +419,7 @@ Original content.`
 	cb := NewContextBuilder(tmpDir)
 
 	// Populate cache
-	sp1 := cb.BuildSystemPromptWithCache()
-	_ = sp1 // cache is warm
+	_ = cb.BuildSystemPromptWithCache()
 
 	// Modify the skill file content (without touching the skills/ directory)
 	updatedSkillMD := `---
@@ -436,12 +445,11 @@ Updated content.`
 		t.Error("sourceFilesChangedLocked() should detect skill file content change")
 	}
 
-	// Verify cache is actually rebuilt with new content
+	// Verify rebuilt system prompt remains minimal and does not include skill body
+	// or catalog text.
 	sp2 := cb.BuildSystemPromptWithCache()
-	if sp1 == sp2 && strings.Contains(sp1, "test-skill") {
-		// If the skill appeared in the prompt and the prompt didn't change,
-		// the cache was not invalidated.
-		t.Error("cache should be invalidated when skill file content changes")
+	if strings.Contains(sp2, "test-skill") {
+		t.Error("system prompt should not contain skill context")
 	}
 }
 
@@ -469,8 +477,8 @@ description: global-v1
 
 	cb := NewContextBuilder(tmpDir)
 	sp1 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(sp1, "global-v1") {
-		t.Fatal("expected initial prompt to contain global skill description")
+	if strings.Contains(sp1, "global-v1") {
+		t.Fatal("system prompt should not contain global skill description")
 	}
 
 	v2 := `---
@@ -494,11 +502,8 @@ description: global-v2
 	}
 
 	sp2 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(sp2, "global-v2") {
-		t.Error("rebuilt prompt should contain updated global skill description")
-	}
-	if sp1 == sp2 {
-		t.Error("cache should be invalidated when global skill file content changes")
+	if strings.Contains(sp2, "global-v2") {
+		t.Error("system prompt should not contain updated global skill description")
 	}
 }
 
@@ -529,8 +534,8 @@ description: builtin-v1
 
 	cb := NewContextBuilder(tmpDir)
 	sp1 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(sp1, "builtin-v1") {
-		t.Fatal("expected initial prompt to contain builtin skill description")
+	if strings.Contains(sp1, "builtin-v1") {
+		t.Fatal("system prompt should not contain builtin skill description")
 	}
 
 	v2 := `---
@@ -554,11 +559,8 @@ description: builtin-v2
 	}
 
 	sp2 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(sp2, "builtin-v2") {
-		t.Error("rebuilt prompt should contain updated builtin skill description")
-	}
-	if sp1 == sp2 {
-		t.Error("cache should be invalidated when builtin skill file content changes")
+	if strings.Contains(sp2, "builtin-v2") {
+		t.Error("system prompt should not contain updated builtin skill description")
 	}
 }
 
@@ -576,8 +578,8 @@ description: delete-me-v1
 
 	cb := NewContextBuilder(tmpDir)
 	sp1 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(sp1, "delete-me-v1") {
-		t.Fatal("expected initial prompt to contain skill description")
+	if strings.Contains(sp1, "delete-me-v1") {
+		t.Fatal("system prompt should not contain skill description")
 	}
 
 	skillPath := filepath.Join(tmpDir, "skills", "delete-me", "SKILL.md")
@@ -595,9 +597,6 @@ description: delete-me-v1
 	sp2 := cb.BuildSystemPromptWithCache()
 	if strings.Contains(sp2, "delete-me-v1") {
 		t.Error("rebuilt prompt should not contain deleted skill description")
-	}
-	if sp1 == sp2 {
-		t.Error("cache should be invalidated when skill file is deleted")
 	}
 }
 
@@ -632,7 +631,7 @@ func TestConcurrentBuildSystemPromptWithCache(t *testing.T) {
 					errs <- "empty prompt returned"
 					return
 				}
-				if !strings.Contains(result, "picoclaw") {
+				if !strings.Contains(result, "Act like a helpful assistant") {
 					errs <- "prompt missing identity"
 					return
 				}
@@ -680,7 +679,7 @@ func TestEmptyWorkspaceBaselineDetectsNewFiles(t *testing.T) {
 	cb := NewContextBuilder(tmpDir)
 
 	// Build cache — all tracked files are absent, maxMtime falls back to epoch.
-	sp1 := cb.BuildSystemPromptWithCache()
+	_ = cb.BuildSystemPromptWithCache()
 
 	// Create a bootstrap file with natural mtime (no Chtimes manipulation).
 	// The file's mtime should be the current wall-clock time, which is
@@ -699,11 +698,8 @@ func TestEmptyWorkspaceBaselineDetectsNewFiles(t *testing.T) {
 	}
 
 	sp2 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(sp2, "Newly created") {
-		t.Error("rebuilt prompt should contain new file content")
-	}
-	if sp1 == sp2 {
-		t.Error("cache should have been invalidated after file creation")
+	if strings.Contains(sp2, "Newly created") {
+		t.Error("system prompt should not contain new file content")
 	}
 }
 
@@ -723,11 +719,11 @@ func TestBuildMessages_IncludesMediaOnlyCurrentMessage(t *testing.T) {
 		"",
 	)
 
-	if len(msgs) != 2 {
-		t.Fatalf("len(msgs) = %d, want 2", len(msgs))
+	if len(msgs) != 3 {
+		t.Fatalf("len(msgs) = %d, want 3", len(msgs))
 	}
 
-	userMsg := msgs[1]
+	userMsg := msgs[2]
 	if userMsg.Role != "user" {
 		t.Fatalf("userMsg.Role = %q, want %q", userMsg.Role, "user")
 	}

@@ -103,6 +103,55 @@ type PromptPart struct {
 	Cache   PromptCachePolicy
 }
 
+type PromptContextLoadingMode string
+
+const (
+	PromptContextLoadingEager    PromptContextLoadingMode = "eager"
+	PromptContextLoadingDeferred PromptContextLoadingMode = "deferred"
+)
+
+type PromptContextLoadingPolicy struct {
+	Bootstrap PromptContextLoadingMode
+	Memory    PromptContextLoadingMode
+}
+
+func (p PromptContextLoadingPolicy) bootstrapMode() PromptContextLoadingMode {
+	return promptContextLoadingModeOrDefault(p.Bootstrap)
+}
+
+func (p PromptContextLoadingPolicy) memoryMode() PromptContextLoadingMode {
+	return promptContextLoadingModeOrDefault(p.Memory)
+}
+
+func (p PromptContextLoadingPolicy) isDefault() bool {
+	return p.bootstrapMode() == PromptContextLoadingEager &&
+		p.memoryMode() == PromptContextLoadingEager
+}
+
+func promptContextLoadingModeOrDefault(mode PromptContextLoadingMode) PromptContextLoadingMode {
+	switch mode {
+	case PromptContextLoadingDeferred:
+		return PromptContextLoadingDeferred
+	default:
+		return PromptContextLoadingEager
+	}
+}
+
+type PromptSizeBreakdown struct {
+	TotalChars int
+	Parts      []PromptPartSize
+}
+
+type PromptPartSize struct {
+	ID          string
+	Layer       PromptLayer
+	Slot        PromptSlot
+	Source      PromptSourceID
+	Title       string
+	Chars       int
+	TokenApprox int
+}
+
 type PromptBuildRequest struct {
 	History []providers.Message
 	Summary string
@@ -124,6 +173,7 @@ type PromptBuildRequest struct {
 	AllowedSkills               []string
 	AllowedTools                []string
 	ToolUseFallback             bool
+	ContextLoading              PromptContextLoadingPolicy
 }
 
 type PromptContributor interface {
@@ -439,6 +489,95 @@ func renderPromptPartsLegacy(parts []PromptPart) string {
 		textParts = append(textParts, part.Content)
 	}
 	return strings.Join(textParts, "\n\n---\n\n")
+}
+
+func promptSizeBreakdown(parts []PromptPart) PromptSizeBreakdown {
+	sorted := sortPromptParts(parts)
+	breakdown := PromptSizeBreakdown{}
+	nonEmptyParts := 0
+	for _, part := range sorted {
+		if strings.TrimSpace(part.Content) == "" {
+			continue
+		}
+		chars := len(part.Content)
+		breakdown.Parts = append(breakdown.Parts, PromptPartSize{
+			ID:          part.ID,
+			Layer:       part.Layer,
+			Slot:        part.Slot,
+			Source:      part.Source.ID,
+			Title:       part.Title,
+			Chars:       chars,
+			TokenApprox: estimatePromptTokensFromChars(chars),
+		})
+		breakdown.TotalChars += chars
+		nonEmptyParts++
+	}
+	if nonEmptyParts > 1 {
+		breakdown.TotalChars += len("\n\n---\n\n") * (nonEmptyParts - 1)
+	}
+	return breakdown
+}
+
+func promptSizeBreakdownFromContentBlocks(blocks []providers.ContentBlock) PromptSizeBreakdown {
+	parts := make([]PromptPart, 0, len(blocks))
+	for _, block := range blocks {
+		parts = append(parts, PromptPart{
+			ID:    block.PromptSource,
+			Layer: PromptLayer(block.PromptLayer),
+			Slot:  PromptSlot(block.PromptSlot),
+			Source: PromptSource{
+				ID: PromptSourceID(block.PromptSource),
+			},
+			Content: block.Text,
+		})
+	}
+	return promptSizeBreakdown(parts)
+}
+
+func (b PromptSizeBreakdown) LogFields(prefix string) map[string]any {
+	fields := map[string]any{
+		prefix + "_chars":         b.TotalChars,
+		prefix + "_tokens_approx": estimatePromptTokensFromChars(b.TotalChars),
+		prefix + "_parts":         len(b.Parts),
+	}
+	for _, part := range b.Parts {
+		key := promptPartSizeLogKey(prefix, part)
+		fields[key+"_chars"] = part.Chars
+		fields[key+"_tokens_approx"] = part.TokenApprox
+	}
+	return fields
+}
+
+func promptPartSizeLogKey(prefix string, part PromptPartSize) string {
+	segments := []string{prefix}
+	if part.Layer != "" {
+		segments = append(segments, string(part.Layer))
+	}
+	if part.Slot != "" {
+		segments = append(segments, string(part.Slot))
+	}
+	if part.Source != "" {
+		segments = append(segments, string(part.Source))
+	}
+	return sanitizePromptMetricKey(strings.Join(segments, "."))
+}
+
+func sanitizePromptMetricKey(key string) string {
+	replacer := strings.NewReplacer(
+		".", "_",
+		":", "_",
+		"/", "_",
+		"-", "_",
+		" ", "_",
+	)
+	return replacer.Replace(key)
+}
+
+func estimatePromptTokensFromChars(chars int) int {
+	if chars <= 0 {
+		return 0
+	}
+	return (chars*2 + 4) / 5
 }
 
 func sortPromptParts(parts []PromptPart) []PromptPart {

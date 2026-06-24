@@ -207,6 +207,7 @@ type systemPromptBuildOptions struct {
 	IncludeToolUseRule  bool
 	AllowedSkills       []string
 	AllowedTools        []string
+	ContextLoading      PromptContextLoadingPolicy
 }
 
 func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) []PromptPart {
@@ -235,16 +236,47 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 		Cache:   PromptCacheEphemeral,
 	})
 
+	stack.Seal()
+	return stack.Parts()
+}
+
+func (cb *ContextBuilder) buildDefaultContextPromptParts(opts systemPromptBuildOptions) []PromptPart {
+	stack := NewPromptStack(cb.promptRegistryOrDefault())
+	add := func(part PromptPart) {
+		if err := stack.Add(part); err != nil {
+			logger.WarnCF("agent", "Skipping invalid prompt part", map[string]any{
+				"id":     part.ID,
+				"layer":  part.Layer,
+				"slot":   part.Slot,
+				"source": part.Source.ID,
+				"error":  err.Error(),
+			})
+		}
+	}
+
 	// Bootstrap files
-	bootstrapContent := cb.LoadBootstrapFiles()
-	if bootstrapContent != "" {
+	if opts.ContextLoading.bootstrapMode() == PromptContextLoadingEager {
+		bootstrapContent := cb.LoadBootstrapFiles()
+		if bootstrapContent != "" {
+			add(PromptPart{
+				ID:      "instruction.workspace",
+				Layer:   PromptLayerInstruction,
+				Slot:    PromptSlotWorkspace,
+				Source:  PromptSource{ID: PromptSourceWorkspace, Name: "workspace"},
+				Title:   "workspace instructions",
+				Content: bootstrapContent,
+				Stable:  true,
+				Cache:   PromptCacheEphemeral,
+			})
+		}
+	} else if manifest := cb.buildDeferredBootstrapManifest(); manifest != "" {
 		add(PromptPart{
-			ID:      "instruction.workspace",
+			ID:      "instruction.workspace.deferred",
 			Layer:   PromptLayerInstruction,
 			Slot:    PromptSlotWorkspace,
-			Source:  PromptSource{ID: PromptSourceWorkspace, Name: "workspace"},
-			Title:   "workspace instructions",
-			Content: bootstrapContent,
+			Source:  PromptSource{ID: PromptSourceWorkspace, Name: "workspace:deferred"},
+			Title:   "deferred workspace instructions",
+			Content: manifest,
 			Stable:  true,
 			Cache:   PromptCacheEphemeral,
 		})
@@ -277,15 +309,28 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	}
 
 	// Memory context
-	memoryContext := cb.memory.GetMemoryContext()
-	if memoryContext != "" {
+	if opts.ContextLoading.memoryMode() == PromptContextLoadingEager {
+		memoryContext := cb.memory.GetMemoryContext()
+		if memoryContext != "" {
+			add(PromptPart{
+				ID:      "context.memory",
+				Layer:   PromptLayerContext,
+				Slot:    PromptSlotMemory,
+				Source:  PromptSource{ID: PromptSourceMemory, Name: "memory:workspace"},
+				Title:   "memory",
+				Content: cb.prompts.memoryPrompt(memoryContext),
+				Stable:  true,
+				Cache:   PromptCacheEphemeral,
+			})
+		}
+	} else if manifest := cb.buildDeferredMemoryManifest(); manifest != "" {
 		add(PromptPart{
-			ID:      "context.memory",
+			ID:      "context.memory.deferred",
 			Layer:   PromptLayerContext,
 			Slot:    PromptSlotMemory,
-			Source:  PromptSource{ID: PromptSourceMemory, Name: "memory:workspace"},
-			Title:   "memory",
-			Content: cb.prompts.memoryPrompt(memoryContext),
+			Source:  PromptSource{ID: PromptSourceMemory, Name: "memory:deferred"},
+			Title:   "deferred memory",
+			Content: manifest,
 			Stable:  true,
 			Cache:   PromptCacheEphemeral,
 		})
@@ -362,7 +407,8 @@ func (cb *ContextBuilder) buildSystemPromptForRequest(
 	useDefaultCache := !req.SuppressSkillContext &&
 		!req.SuppressToolUseRule &&
 		len(req.AllowedSkills) == 0 &&
-		len(req.AllowedTools) == 0
+		len(req.AllowedTools) == 0 &&
+		req.ContextLoading.isDefault()
 	if useDefaultCache {
 		staticPrompt := cb.BuildSystemPromptWithCache()
 		return staticPrompt, []providers.ContentBlock{
@@ -381,6 +427,7 @@ func (cb *ContextBuilder) buildSystemPromptForRequest(
 		IncludeToolUseRule:  !req.SuppressToolUseRule,
 		AllowedSkills:       req.AllowedSkills,
 		AllowedTools:        req.AllowedTools,
+		ContextLoading:      req.ContextLoading,
 	})
 	staticPrompt := renderPromptPartsLegacy(parts)
 	blocks := make([]providers.ContentBlock, 0, len(parts))
@@ -742,6 +789,71 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 	return sb.String()
 }
 
+func (cb *ContextBuilder) buildDeferredBootstrapManifest() string {
+	agentDefinition := cb.LoadAgentDefinition()
+	var paths []string
+	if agentDefinition.Agent != nil {
+		paths = append(paths, relativeWorkspacePath(cb.workspace, agentDefinition.Agent.Path))
+	}
+	if agentDefinition.Soul != nil {
+		paths = append(paths, relativeWorkspacePath(cb.workspace, agentDefinition.Soul.Path))
+	}
+	if agentDefinition.User != nil {
+		paths = append(paths, relativeWorkspacePath(cb.workspace, agentDefinition.User.Path))
+	}
+	if agentDefinition.Source != AgentDefinitionSourceAgent {
+		identityPath := filepath.Join(cb.workspace, "IDENTITY.md")
+		if _, err := os.Stat(identityPath); err == nil {
+			paths = append(paths, relativeWorkspacePath(cb.workspace, identityPath))
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Deferred Workspace Context\n\n")
+	sb.WriteString("Workspace instruction files are available but not loaded into this prompt. Read only the relevant files when their instructions are needed:\n")
+	for _, path := range paths {
+		fmt.Fprintf(&sb, "- %s\n", path)
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func (cb *ContextBuilder) buildDeferredMemoryManifest() string {
+	if cb.memory == nil {
+		return ""
+	}
+	var paths []string
+	if fileExistsWithContent(cb.memory.memoryFile) {
+		paths = append(paths, relativeWorkspacePath(cb.workspace, cb.memory.memoryFile))
+	}
+	for i := range 3 {
+		date := time.Now().AddDate(0, 0, -i)
+		dateStr := date.Format("20060102")
+		path := filepath.Join(cb.memory.memoryDir, dateStr[:6], dateStr+".md")
+		if fileExistsWithContent(path) {
+			paths = append(paths, relativeWorkspacePath(cb.workspace, path))
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Deferred Memory Context\n\n")
+	sb.WriteString("Memory exists but is not loaded into this prompt. Read only the relevant files when personal or session memory is needed:\n")
+	for _, path := range paths {
+		fmt.Fprintf(&sb, "- %s\n", path)
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func fileExistsWithContent(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
 // buildDynamicContext returns a short dynamic context string with per-request info.
 // This changes every request (time, session) so it is NOT part of the cached prompt.
 // LLM-side KV cache reuse is achieved by each provider adapter's native mechanism:
@@ -813,11 +925,11 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 	// - Codex maps only the first system message to its instructions field.
 	// - OpenAI-compat passes messages through as-is.
 	staticPrompt, contentBlocks := cb.buildSystemPromptForRequest(req)
+	staticBreakdown := promptSizeBreakdownFromContentBlocks(contentBlocks)
 
-	// Compose a single system message: static (cached) + dynamic + optional summary.
-	// Keeping all system content in one message ensures every provider adapter can
-	// extract it correctly (Anthropic adapter -> top-level system param,
-	// Codex -> instructions field).
+	// Compose a minimal system message for provider-level instructions only.
+	// Request-scoped and workspace context is injected later as a preset user
+	// message so variable context does not live in the system prompt.
 	//
 	// SystemParts carries the same content as structured blocks so that
 	// cache-aware adapters (Anthropic) can set per-block cache_control.
@@ -828,13 +940,24 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 		stringParts = append(stringParts, staticPrompt)
 	}
 
+	contextParts := []PromptPart{}
+	if !req.SuppressDefaultSystemPrompt {
+		contextParts = append(contextParts, cb.buildDefaultContextPromptParts(systemPromptBuildOptions{
+			IncludeSkillCatalog: !req.SuppressSkillContext,
+			IncludeToolUseRule:  !req.SuppressToolUseRule,
+			AllowedSkills:       req.AllowedSkills,
+			AllowedTools:        req.AllowedTools,
+			ContextLoading:      req.ContextLoading,
+		})...)
+	}
+
 	promptParts := append([]PromptPart(nil), req.Overlays...)
 	if !req.SuppressDefaultSystemPrompt && !req.SuppressSkillContext {
 		activeSkills := append([]string(nil), req.ActiveSkills...)
 		if len(req.AllowedSkills) > 0 {
 			activeSkills = filterNamesByTurnProfile(activeSkills, req.AllowedSkills)
 		}
-		promptParts = append(promptParts, cb.buildActiveSkillsPromptParts(activeSkills)...)
+		contextParts = append(contextParts, cb.buildActiveSkillsPromptParts(activeSkills)...)
 	}
 	if !req.SuppressDefaultSystemPrompt {
 		if contributedParts, err := cb.promptRegistryOrDefault().Collect(context.Background(), req); err != nil {
@@ -842,7 +965,7 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 				"error": err.Error(),
 			})
 		} else {
-			promptParts = append(promptParts, contributedParts...)
+			contextParts = append(contextParts, contributedParts...)
 		}
 	}
 
@@ -886,8 +1009,7 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 			Stable:  false,
 			Cache:   PromptCacheNone,
 		}
-		stringParts = append(stringParts, dynamicCtx)
-		contentBlocks = append(contentBlocks, promptContentBlock(runtimePart, nil))
+		contextParts = append(contextParts, runtimePart)
 
 		if req.Summary != "" {
 			summaryPart := PromptPart{
@@ -900,10 +1022,10 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 				Stable:  false,
 				Cache:   PromptCacheNone,
 			}
-			stringParts = append(stringParts, summaryPart.Content)
-			contentBlocks = append(contentBlocks, promptContentBlock(summaryPart, nil))
+			contextParts = append(contextParts, summaryPart)
 		}
 	}
+	contextParts = filterValidPromptParts(cb.promptRegistryOrDefault(), contextParts)
 
 	if len(stringParts) == 0 && req.ToolUseFallback {
 		fallbackPart := PromptPart{
@@ -929,15 +1051,28 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 	isCached := cb.cachedSystemPrompt != ""
 	cb.systemPromptMutex.RUnlock()
 
-	logger.DebugCF("agent", "System prompt built",
-		map[string]any{
-			"static_chars":  len(staticPrompt),
-			"dynamic_chars": dynamicChars,
-			"total_chars":   len(fullSystemPrompt),
-			"has_summary":   req.Summary != "",
-			"overlays":      len(req.Overlays),
-			"cached":        isCached,
-		})
+	contextText := renderPromptPartsLegacy(contextParts)
+	logFields := map[string]any{
+		"static_chars":  len(staticPrompt),
+		"dynamic_chars": dynamicChars,
+		"total_chars":   len(fullSystemPrompt),
+		"context_chars": len(contextText),
+		"has_summary":   req.Summary != "",
+		"overlays":      len(req.Overlays),
+		"cached":        isCached,
+	}
+	for key, value := range staticBreakdown.LogFields("static_prompt") {
+		logFields[key] = value
+	}
+	systemBreakdown := promptSizeBreakdownFromContentBlocks(contentBlocks)
+	for key, value := range systemBreakdown.LogFields("system_prompt") {
+		logFields[key] = value
+	}
+	contextBreakdown := promptSizeBreakdown(contextParts)
+	for key, value := range contextBreakdown.LogFields("preset_context") {
+		logFields[key] = value
+	}
+	logger.DebugCF("agent", "System prompt built", logFields)
 
 	// Log preview of system prompt (avoid logging huge content)
 	preview := utils.Truncate(fullSystemPrompt, 500)
@@ -957,6 +1092,14 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 			Content:     fullSystemPrompt,
 			SystemParts: contentBlocks,
 		})
+	}
+	if strings.TrimSpace(contextText) != "" {
+		messages = append(messages, promptMessageWithMetadata(
+			providers.Message{Role: "user", Content: contextText},
+			PromptLayerTurn,
+			PromptSlotMessage,
+			PromptSourceRuntime,
+		))
 	}
 
 	// Add conversation history
@@ -1153,6 +1296,32 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 	}
 
 	return final
+}
+
+func filterValidPromptParts(registry *PromptRegistry, parts []PromptPart) []PromptPart {
+	if len(parts) == 0 {
+		return nil
+	}
+	valid := make([]PromptPart, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part.Content) == "" {
+			continue
+		}
+		if registry != nil {
+			if err := registry.ValidatePart(part); err != nil {
+				logger.WarnCF("agent", "Skipping invalid preset context part", map[string]any{
+					"id":     part.ID,
+					"layer":  part.Layer,
+					"slot":   part.Slot,
+					"source": part.Source.ID,
+					"error":  err.Error(),
+				})
+				continue
+			}
+		}
+		valid = append(valid, part)
+	}
+	return valid
 }
 
 func (cb *ContextBuilder) AddToolResult(

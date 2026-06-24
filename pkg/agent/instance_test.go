@@ -759,7 +759,7 @@ mcpServers: []
 		t.Fatal("expected empty mcpServers allowlist to deny all servers")
 	}
 	messages := agent.ContextBuilder.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	if prompt := messages[0].Content; strings.Contains(prompt, tools.BM25SearchToolName) {
+	if prompt := presetContextMessage(t, messages).Content; strings.Contains(prompt, tools.BM25SearchToolName) {
 		t.Fatalf("expected no tool discovery prompt when no MCP servers are selected, got %q", prompt)
 	}
 }
@@ -802,7 +802,7 @@ mcpServers: [github]
 	}, &cfg.Agents.Defaults, cfg, &mockProvider{})
 
 	messages := agent.ContextBuilder.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	if prompt := messages[0].Content; !strings.Contains(prompt, tools.BM25SearchToolName) {
+	if prompt := presetContextMessage(t, messages).Content; !strings.Contains(prompt, tools.BM25SearchToolName) {
 		t.Fatalf("expected tool discovery prompt when a discoverable MCP server is selected, got %q", prompt)
 	}
 }

@@ -268,8 +268,11 @@ func TestStructuredAgentUserChangesInvalidateCache(t *testing.T) {
 	cb := NewContextBuilder(tmpDir)
 
 	promptV1 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(promptV1, "Initial workspace preferences") {
-		t.Fatalf("expected workspace USER.md in prompt, got %q", promptV1)
+	if strings.Contains(promptV1, "Initial workspace preferences") {
+		t.Fatalf("system prompt should not contain workspace USER.md, got %q", promptV1)
+	}
+	if preset := presetContextMessage(t, cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})).Content; !strings.Contains(preset, "Initial workspace preferences") {
+		t.Fatalf("expected workspace USER.md in preset context, got %q", preset)
 	}
 
 	userPath := filepath.Join(tmpDir, "USER.md")
@@ -289,8 +292,11 @@ func TestStructuredAgentUserChangesInvalidateCache(t *testing.T) {
 	}
 
 	promptV2 := cb.BuildSystemPromptWithCache()
-	if !strings.Contains(promptV2, "Updated workspace preferences") {
-		t.Fatalf("expected updated workspace USER.md in prompt, got %q", promptV2)
+	if strings.Contains(promptV2, "Updated workspace preferences") {
+		t.Fatalf("system prompt should not contain updated workspace USER.md, got %q", promptV2)
+	}
+	if preset := presetContextMessage(t, cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})).Content; !strings.Contains(preset, "Updated workspace preferences") {
+		t.Fatalf("expected updated workspace USER.md in preset context, got %q", preset)
 	}
 }
 
