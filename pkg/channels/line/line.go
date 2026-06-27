@@ -69,7 +69,8 @@ func NewLINEChannel(
 		return nil, fmt.Errorf("failed to create LINE messaging client: %w", err)
 	}
 
-	base := channels.NewBaseChannel("line", cfg, messageBus, bc.AllowFrom,
+	base := channels.NewBaseChannel(
+		"line", cfg, messageBus, bc.AllowFrom,
 		channels.WithMaxMessageLength(5000),
 		channels.WithGroupTrigger(bc.GroupTrigger),
 		channels.WithReasoningChannelID(bc.ReasoningChannelID),
@@ -481,11 +482,11 @@ func (c *LINEChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 				ReplyToken: tokenEntry.token,
 				Messages:   []messaging_api.MessageInterface{&textMsg},
 			})
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		if err == nil {
-			logger.DebugCF("line", "Message sent via Reply API", map[string]any{
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			if err == nil {
+				logger.DebugCF("line", "Message sent via Reply API", map[string]any{
 					"chat_id": msg.ChatID,
 					"quoted":  quoteToken != "",
 				})
